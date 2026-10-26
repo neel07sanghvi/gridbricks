@@ -118,6 +118,7 @@ body {
   background: var(--color-surface-elevated);
   color: var(--color-text-primary);
   font-size: 0.8125rem;
+  color-scheme: light dark;
 }
 
 .metrics-grid {
