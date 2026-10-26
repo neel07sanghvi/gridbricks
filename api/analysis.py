@@ -1,107 +1,135 @@
 from __future__ import annotations
 
-import pandas as pd
-import numpy as np
+from collections import defaultdict
+from datetime import datetime
+from math import sqrt
 
 
-def _prepare_merged(actuals: list[dict], forecasts: list[dict]) -> pd.DataFrame:
-    df_actual = pd.DataFrame(actuals)
-    df_forecast = pd.DataFrame(forecasts)
+def _parse_dt(s: str) -> datetime:
+    return datetime.fromisoformat(s.replace("Z", "+00:00"))
 
-    if df_actual.empty or df_forecast.empty:
-        return pd.DataFrame()
 
-    df_actual["startTime"] = pd.to_datetime(df_actual["startTime"])
-    df_forecast["startTime"] = pd.to_datetime(df_forecast["startTime"])
-    df_forecast["publishTime"] = pd.to_datetime(df_forecast["publishTime"])
+def _floor_hour(dt: datetime) -> str:
+    return dt.strftime("%Y-%m-%dT%H:00:00Z")
 
-    df_forecast_latest = (
-        df_forecast.sort_values("publishTime", ascending=False)
-        .groupby("startTime")
-        .first()
-        .reset_index()
-    )
 
-    df_actual["startTime_hour"] = df_actual["startTime"].dt.floor("h")
-    actual_hourly = (
-        df_actual.groupby("startTime_hour")["generation"]
-        .mean()
-        .reset_index()
-        .rename(columns={"startTime_hour": "startTime", "generation": "actual"})
-    )
+def _prepare_merged(actuals: list[dict], forecasts: list[dict]) -> list[dict]:
+    if not actuals or not forecasts:
+        return []
 
-    merged = pd.merge(
-        actual_hourly,
-        df_forecast_latest[["startTime", "generation"]].rename(
-            columns={"generation": "forecast"}
-        ),
-        on="startTime",
-        how="inner",
-    )
+    # Get latest forecast per startTime (by publishTime)
+    latest_forecast = {}
+    for f in forecasts:
+        st = f["startTime"]
+        if st not in latest_forecast or f["publishTime"] > latest_forecast[st]["publishTime"]:
+            latest_forecast[st] = f
 
-    merged["error"] = merged["forecast"] - merged["actual"]
-    merged["abs_error"] = merged["error"].abs()
+    # Aggregate actuals to hourly (mean of 30-min periods)
+    hourly_actual = defaultdict(list)
+    for a in actuals:
+        hour_key = _floor_hour(_parse_dt(a["startTime"]))
+        hourly_actual[hour_key].append(a["generation"])
+
+    actual_hourly = {}
+    for hour_key, values in hourly_actual.items():
+        actual_hourly[hour_key] = sum(values) / len(values)
+
+    # Merge on startTime
+    merged = []
+    for st, forecast in latest_forecast.items():
+        hour_key = _floor_hour(_parse_dt(st))
+        if hour_key in actual_hourly:
+            actual = actual_hourly[hour_key]
+            fcast = forecast["generation"]
+            error = fcast - actual
+            merged.append({
+                "startTime": hour_key,
+                "actual": actual,
+                "forecast": fcast,
+                "error": error,
+                "abs_error": abs(error),
+            })
+
+    merged.sort(key=lambda x: x["startTime"])
     return merged
+
+
+def _mean(values: list[float]) -> float:
+    return sum(values) / len(values) if values else 0.0
+
+
+def _correlation(xs: list[float], ys: list[float]) -> float:
+    n = len(xs)
+    if n < 2:
+        return 0.0
+    mx, my = _mean(xs), _mean(ys)
+    num = sum((x - mx) * (y - my) for x, y in zip(xs, ys))
+    dx = sqrt(sum((x - mx) ** 2 for x in xs))
+    dy = sqrt(sum((y - my) ** 2 for y in ys))
+    if dx == 0 or dy == 0:
+        return 0.0
+    return num / (dx * dy)
 
 
 def compute_accuracy_metrics(actuals: list[dict], forecasts: list[dict]) -> dict:
     merged = _prepare_merged(actuals, forecasts)
-    if merged.empty:
+    if not merged:
         return {}
 
     n = len(merged)
-    mae = merged["abs_error"].mean()
-    rmse = np.sqrt((merged["error"] ** 2).mean())
-    mape = (merged["abs_error"] / merged["actual"].abs().clip(lower=1) * 100).mean()
-    bias = merged["error"].mean()
-    max_over = merged["error"].max()
-    max_under = merged["error"].min()
-    correlation = merged["actual"].corr(merged["forecast"])
+    errors = [m["error"] for m in merged]
+    abs_errors = [m["abs_error"] for m in merged]
+    actuals_v = [m["actual"] for m in merged]
+    forecasts_v = [m["forecast"] for m in merged]
 
-    actual_mean = merged["actual"].mean()
-    forecast_mean = merged["forecast"].mean()
+    mae = _mean(abs_errors)
+    rmse = sqrt(_mean([e ** 2 for e in errors]))
+    mape = _mean([ae / max(abs(a), 1) * 100 for ae, a in zip(abs_errors, actuals_v)])
+    bias = _mean(errors)
+    corr = _correlation(actuals_v, forecasts_v)
 
     return {
-        "mae": round(float(mae), 1),
-        "rmse": round(float(rmse), 1),
-        "mape": round(float(mape), 2),
-        "bias": round(float(bias), 1),
-        "max_over_forecast": round(float(max_over), 1),
-        "max_under_forecast": round(float(max_under), 1),
-        "correlation": round(float(correlation), 4),
-        "actual_mean_mw": round(float(actual_mean), 1),
-        "forecast_mean_mw": round(float(forecast_mean), 1),
+        "mae": round(mae, 1),
+        "rmse": round(rmse, 1),
+        "mape": round(mape, 2),
+        "bias": round(bias, 1),
+        "max_over_forecast": round(max(errors), 1),
+        "max_under_forecast": round(min(errors), 1),
+        "correlation": round(corr, 4),
+        "actual_mean_mw": round(_mean(actuals_v), 1),
+        "forecast_mean_mw": round(_mean(forecasts_v), 1),
         "data_points": n,
     }
 
 
 def compute_daily_metrics(actuals: list[dict], forecasts: list[dict]) -> list[dict]:
     merged = _prepare_merged(actuals, forecasts)
-    if merged.empty:
+    if not merged:
         return []
 
-    merged["date"] = merged["startTime"].dt.date
-
-    daily = merged.groupby("date").agg(
-        actual_mean=("actual", "mean"),
-        forecast_mean=("forecast", "mean"),
-        mae=("abs_error", "mean"),
-        bias=("error", "mean"),
-        max_error=("abs_error", "max"),
-    ).reset_index()
-
-    daily["mape"] = (daily["mae"] / daily["actual_mean"].clip(lower=1) * 100).round(2)
+    daily = defaultdict(list)
+    for m in merged:
+        date = m["startTime"][:10]
+        daily[date].append(m)
 
     result = []
-    for _, row in daily.iterrows():
+    for date in sorted(daily):
+        rows = daily[date]
+        actual_mean = _mean([r["actual"] for r in rows])
+        forecast_mean = _mean([r["forecast"] for r in rows])
+        mae = _mean([r["abs_error"] for r in rows])
+        bias = _mean([r["error"] for r in rows])
+        max_error = max(r["abs_error"] for r in rows)
+        mape = mae / max(actual_mean, 1) * 100
+
         result.append({
-            "date": str(row["date"]),
-            "actual_mean": round(float(row["actual_mean"]), 1),
-            "forecast_mean": round(float(row["forecast_mean"]), 1),
-            "mae": round(float(row["mae"]), 1),
-            "mape": round(float(row["mape"]), 2),
-            "bias": round(float(row["bias"]), 1),
-            "max_error": round(float(row["max_error"]), 1),
+            "date": date,
+            "actual_mean": round(actual_mean, 1),
+            "forecast_mean": round(forecast_mean, 1),
+            "mae": round(mae, 1),
+            "mape": round(mape, 2),
+            "bias": round(bias, 1),
+            "max_error": round(max_error, 1),
         })
 
     return result
@@ -109,24 +137,22 @@ def compute_daily_metrics(actuals: list[dict], forecasts: list[dict]) -> list[di
 
 def compute_hourly_error_profile(actuals: list[dict], forecasts: list[dict]) -> list[dict]:
     merged = _prepare_merged(actuals, forecasts)
-    if merged.empty:
+    if not merged:
         return []
 
-    merged["hour"] = merged["startTime"].dt.hour
-
-    hourly = merged.groupby("hour").agg(
-        mae=("abs_error", "mean"),
-        bias=("error", "mean"),
-        count=("error", "count"),
-    ).reset_index()
+    hourly = defaultdict(list)
+    for m in merged:
+        hour = _parse_dt(m["startTime"]).hour
+        hourly[hour].append(m)
 
     result = []
-    for _, row in hourly.iterrows():
+    for hour in sorted(hourly):
+        rows = hourly[hour]
         result.append({
-            "hour": int(row["hour"]),
-            "mae": round(float(row["mae"]), 1),
-            "bias": round(float(row["bias"]), 1),
-            "count": int(row["count"]),
+            "hour": hour,
+            "mae": round(_mean([r["abs_error"] for r in rows]), 1),
+            "bias": round(_mean([r["error"] for r in rows]), 1),
+            "count": len(rows),
         })
 
     return result

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from collections import defaultdict
+from datetime import datetime
+
 from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 import httpx
-import pandas as pd
 
 from data_fetcher import fetch_wind_actuals, fetch_wind_forecasts
 from analysis import compute_accuracy_metrics, compute_daily_metrics, compute_hourly_error_profile
@@ -17,6 +19,14 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+def _parse_dt(s: str) -> datetime:
+    return datetime.fromisoformat(s.replace("Z", "+00:00"))
+
+
+def _floor_hour(dt: datetime) -> str:
+    return dt.strftime("%Y-%m-%dT%H:00:00Z")
 
 
 @app.get("/api/actuals")
@@ -68,45 +78,43 @@ async def get_comparison(
         actuals = await fetch_wind_actuals(client, date_from, date_to)
         forecasts = await fetch_wind_forecasts(client, date_from, date_to)
 
-    df_actual = pd.DataFrame(actuals)
-    df_forecast = pd.DataFrame(forecasts)
-
-    if df_actual.empty or df_forecast.empty:
+    if not actuals or not forecasts:
         return {"data": [], "count": 0}
 
-    df_actual["startTime"] = pd.to_datetime(df_actual["startTime"])
-    df_forecast["startTime"] = pd.to_datetime(df_forecast["startTime"])
+    # Latest forecast per startTime
+    latest_forecast = {}
+    for f in forecasts:
+        st = f["startTime"]
+        if st not in latest_forecast or f["publishTime"] > latest_forecast[st]["publishTime"]:
+            latest_forecast[st] = f
 
-    df_forecast_latest = (
-        df_forecast.sort_values("publishTime", ascending=False)
-        .groupby("startTime")
-        .first()
-        .reset_index()
-    )
+    # Aggregate actuals to hourly
+    hourly_actual = defaultdict(list)
+    for a in actuals:
+        hour_key = _floor_hour(_parse_dt(a["startTime"]))
+        hourly_actual[hour_key].append(a["generation"])
 
-    df_actual["startTime_hour"] = df_actual["startTime"].dt.floor("h")
-    actual_hourly = (
-        df_actual.groupby("startTime_hour")["generation"]
-        .mean()
-        .reset_index()
-        .rename(columns={"startTime_hour": "startTime", "generation": "actual"})
-    )
+    actual_hourly = {k: sum(v) / len(v) for k, v in hourly_actual.items()}
 
-    merged = pd.merge(
-        actual_hourly,
-        df_forecast_latest[["startTime", "generation"]].rename(
-            columns={"generation": "forecast"}
-        ),
-        on="startTime",
-        how="inner",
-    )
+    # Merge
+    records = []
+    for st, forecast in latest_forecast.items():
+        hour_key = _floor_hour(_parse_dt(st))
+        if hour_key in actual_hourly:
+            actual = actual_hourly[hour_key]
+            fcast = forecast["generation"]
+            error = fcast - actual
+            pct_error = round(error / actual * 100, 2) if actual != 0 else 0
+            records.append({
+                "startTime": hour_key,
+                "actual": actual,
+                "forecast": fcast,
+                "error": error,
+                "abs_error": abs(error),
+                "pct_error": pct_error,
+            })
 
-    merged["error"] = merged["forecast"] - merged["actual"]
-    merged["abs_error"] = merged["error"].abs()
-    merged["pct_error"] = (merged["error"] / merged["actual"] * 100).round(2)
-    merged["startTime"] = merged["startTime"].dt.strftime("%Y-%m-%dT%H:%M:%SZ")
-
-    records = merged.to_dict(orient="records")
+    records.sort(key=lambda x: x["startTime"])
     return {"data": records, "count": len(records)}
 
 
