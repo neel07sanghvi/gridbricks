@@ -99,13 +99,16 @@ body {
 
 .date-controls {
   display: flex;
-  gap: 12px;
+  gap: 20px;
   align-items: center;
   margin-bottom: 24px;
   flex-wrap: wrap;
 }
 
 .date-controls label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   font-size: 0.8125rem;
   font-weight: 500;
   color: var(--color-text-secondary);

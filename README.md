@@ -16,7 +16,9 @@ A web application for visualizing and evaluating UK national wind power generati
 ## Project Structure
 
 ```
-├── backend/                # Python FastAPI backend
+├── api/                    # Vercel serverless Python backend
+│   └── index.py            # FastAPI app (all endpoints, data fetching, analysis)
+├── backend/                # Local/Docker Python backend (pandas/numpy)
 │   ├── main.py             # API endpoints and app setup
 │   ├── data_fetcher.py     # Elexon API integration
 │   ├── analysis.py         # Forecast accuracy computations
@@ -28,9 +30,11 @@ A web application for visualizing and evaluating UK national wind power generati
 │   │   ├── components/     # Chart and metric components
 │   │   ├── services/       # API client
 │   │   └── hooks/          # Custom React hooks
-│   ├── nginx.conf          # Production reverse proxy config
+│   ├── nginx.conf          # Docker reverse proxy config
 │   └── Dockerfile
-├── docker-compose.yml      # Multi-container orchestration
+├── docker-compose.yml      # Multi-container orchestration (local)
+├── vercel.json             # Vercel deployment config
+├── requirements.txt        # Serverless Python dependencies
 └── README.md
 ```
 
@@ -79,7 +83,28 @@ All endpoints accept `date_from` and `date_to` query parameters (YYYY-MM-DD).
 
 ## Deployed Application
 
-Link: _[To be added after deployment]_
+**Live:** https://gridbricks-psi.vercel.app
+
+Hosted on Vercel — frontend as static build, backend as Python serverless functions.
+
+## Tech Stack
+
+| Layer | Technology | Why |
+|---|---|---|
+| Frontend | React + Vite | Fast dev experience, component-based UI |
+| Charts | Recharts | React-native charting, responsive & interactive |
+| HTTP Client | Axios | Promise-based, clean API abstraction |
+| Backend | Python FastAPI | Async-first, auto-docs, type validation |
+| Data Source | Elexon BMRS API | Official UK energy market data |
+| Deployment | Vercel | Zero-config frontend + serverless Python |
+| Local Dev | Docker Compose | Reproducible multi-service setup |
+
+## Design Decisions
+
+- **Pure Python serverless backend** — The Vercel deployment uses only stdlib + FastAPI + httpx (no pandas/numpy) to stay within serverless size and runtime constraints. The local Docker backend uses pandas for richer analysis.
+- **Hourly aggregation** — Actuals arrive at 30-minute resolution (settlement periods), forecasts at hourly. We aggregate actuals to hourly means before comparison.
+- **Latest forecast per hour** — When multiple forecasts exist for the same period (published at different times), we use the most recent one, simulating what a procurement team would actually see.
+- **January 2026 scope** — Date range is constrained to January 2026 per the assignment brief, ensuring consistent data availability from BMRS.
 
 ## AI Tools Used
 
